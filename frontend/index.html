@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CA Comply</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 :root{--bg:#0f1117;--surface:#1a1f2e;--surface2:#212736;--border:#2a3142;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--accent:#3b82f6;--accent-dim:rgba(59,130,246,0.12);--green:#10b981;--green-dim:rgba(16,185,129,0.12);--red:#ef4444;--red-dim:rgba(239,68,68,0.12);--yellow:#f59e0b;--yellow-dim:rgba(245,158,11,0.12);--purple:#8b5cf6;--sidebar:220px;}
@@ -205,7 +206,8 @@ const state = {
   data: {
     stats: null, clients: [], tasks: [], documents: [],
     users: [], notifications: [], workload: [],
-    analytics: null, activities: [], errors: []
+    analytics: null, activities: [], errors: [],
+    bankData: null, bankSearch: '', bankPage: 0
   },
   loading: false,
   modals: {},
@@ -304,6 +306,11 @@ async function loadPageData(page) {
     } else if (page === 'notifications') {
       const d = await api('GET', '/notifications');
       if (d) state.data.notifications = d.notifications;
+    } else if (page === 'bank_analysis') {
+      if (!state.data.clients.length) {
+        const d = await api('GET', '/clients?limit=500');
+        if (d) state.data.clients = d.clients;
+      }
     }
   } catch (e) {
     toast(e.message, 'error');
@@ -469,6 +476,7 @@ function renderSidebar() {
     { id: 'clients', icon: '👥', label: 'Clients' },
     { id: 'documents', icon: '📁', label: 'Documents' },
     { id: 'users', icon: '👤', label: 'Work Allocation', badge: unassignedBadge },
+    { id: 'bank_analysis', icon: '🏦', label: 'Bank Analysis' },
     { id: 'analytics', icon: '📈', label: 'Analytics' },
     { id: 'notifications', icon: '🔔', label: 'Notifications', badge: notifCount > 0 ? `<span class="nav-badge">${notifCount}</span>` : '' },
     { id: 'settings', icon: '⚙️', label: 'Settings' },
@@ -503,7 +511,7 @@ function renderSidebar() {
 }
 
 function renderTopbar() {
-  const titles = { dashboard: 'Dashboard', compliance: 'Compliance Tasks', clients: 'Client Management', documents: 'Document Vault', users: 'Work Allocation', analytics: 'Analytics & Insights', notifications: 'Notifications', settings: 'Settings' };
+  const titles = { dashboard: 'Dashboard', compliance: 'Compliance Tasks', clients: 'Client Management', documents: 'Document Vault', users: 'Work Allocation', bank_analysis: 'Bank Statement Analyser', analytics: 'Analytics & Insights', notifications: 'Notifications', settings: 'Settings' };
   return `
   <div class="topbar">
     <span class="topbar-title">${titles[state.currentPage] || 'CA Comply'}</span>
@@ -533,7 +541,7 @@ function bindTopbar() {
 // ── PAGES
 function renderPage() {
   if (state.loading) return `<div class="loading"><div class="spinner"></div>Loading...</div>`;
-  const pages = { dashboard: renderDashboard, compliance: renderCompliance, clients: renderClients, documents: renderDocuments, users: renderUsers, analytics: renderAnalytics, notifications: renderNotifications, settings: renderSettings };
+  const pages = { dashboard: renderDashboard, compliance: renderCompliance, clients: renderClients, documents: renderDocuments, users: renderUsers, bank_analysis: renderBankAnalysis, analytics: renderAnalytics, notifications: renderNotifications, settings: renderSettings };
   return (pages[state.currentPage] || renderDashboard)();
 }
 
@@ -542,6 +550,7 @@ function bindPage() {
   if (state.currentPage === 'clients') bindClients();
   if (state.currentPage === 'documents') bindDocuments();
   if (state.currentPage === 'users') bindUsers();
+  if (state.currentPage === 'bank_analysis') bindBankAnalysis();
   if (state.currentPage === 'analytics') bindAnalytics();
   if (state.currentPage === 'notifications') bindNotifications();
   if (state.currentPage === 'settings') bindSettings();
@@ -1029,6 +1038,431 @@ async function removeUser(userId, name) {
 }
 
 function bindUsers() {}
+
+// ── BANK STATEMENT ANALYSER
+function formatINR(n) {
+  return '₹' + Math.abs(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
+function parseCSVRows(text) {
+  const lines = text.split(/\r?\n/);
+  return lines.map(line => {
+    const cells = []; let cur = ''; let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === ',' && !inQ) { cells.push(cur.trim()); cur = ''; }
+      else { cur += ch; }
+    }
+    cells.push(cur.trim());
+    return cells;
+  });
+}
+
+function parseDate(val) {
+  if (val === null || val === undefined || val === '') return null;
+  if (typeof val === 'number') {
+    // Excel serial date
+    const d = new Date(Math.round((val - 25569) * 86400 * 1000));
+    if (isNaN(d)) return null;
+    return d.toISOString().slice(0, 10);
+  }
+  const s = String(val).trim();
+  // DD/MM/YYYY or DD-MM-YYYY
+  const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m1) return `${m1[3]}-${m1[2].padStart(2,'0')}-${m1[1].padStart(2,'0')}`;
+  // YYYY-MM-DD or YYYY/MM/DD
+  const m2 = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (m2) return `${m2[1]}-${m2[2].padStart(2,'0')}-${m2[3].padStart(2,'0')}`;
+  // DD MMM YYYY (e.g. 01 Jan 2024)
+  const m3 = s.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/);
+  if (m3) {
+    const months = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+    const mo = months[m3[2].toLowerCase()];
+    if (mo) return `${m3[3]}-${String(mo).padStart(2,'0')}-${m3[1].padStart(2,'0')}`;
+  }
+  return null;
+}
+
+function parseAmount(val) {
+  if (val === null || val === undefined || val === '') return 0;
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  const s = String(val).replace(/[₹,\s]/g, '').replace(/\(([^)]+)\)/, '-$1');
+  if (s === '' || s === '-' || s.toLowerCase() === 'nil' || s.toLowerCase() === 'n/a') return 0;
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+function detectAndNormalizeColumns(rows) {
+  const keywords = ['date','narr','particular','desc','detail','remark','transact','debit','dr.','dr ','credit','cr.','cr ','withdraw','deposit','amount','balance','closing'];
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(15, rows.length); i++) {
+    const row = rows[i].map(c => String(c || '').trim().toLowerCase());
+    const hits = row.filter(c => keywords.some(kw => c.includes(kw)));
+    if (hits.length >= 2) { headerIdx = i; break; }
+  }
+  if (headerIdx === -1) return [];
+  const headers = rows[headerIdx].map(c => String(c || '').trim().toLowerCase());
+  const find = (...kws) => headers.findIndex(h => kws.some(kw => h.includes(kw)));
+  const dateIdx  = find('date');
+  const descIdx  = find('narr','particular','desc','detail','remark','transact','particular');
+  const debitIdx = find('debit','dr.','withdrawal','withdraw','dr ');
+  const creditIdx= find('credit','cr.','deposit','cr ');
+  const amtIdx   = find('amount');
+  const balIdx   = find('balance','closing');
+
+  const txns = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || row.every(c => !String(c || '').trim())) continue;
+    const rawDate = dateIdx >= 0 ? row[dateIdx] : row[0];
+    const date = parseDate(rawDate);
+    if (!date) continue;
+    const desc = descIdx >= 0 ? String(row[descIdx] || '').trim() : '';
+    let debit = 0, credit = 0;
+    if (debitIdx >= 0 && creditIdx >= 0) {
+      debit  = parseAmount(row[debitIdx]);
+      credit = parseAmount(row[creditIdx]);
+    } else if (amtIdx >= 0) {
+      const amt = parseAmount(row[amtIdx]);
+      if (amt < 0) debit = Math.abs(amt); else credit = amt;
+    }
+    const balance = balIdx >= 0 ? parseAmount(row[balIdx]) : null;
+    if (!desc && debit === 0 && credit === 0) continue;
+    txns.push({ date, desc, debit, credit, balance });
+  }
+  return txns;
+}
+
+function categorizeTransactions(txns) {
+  const rules = [
+    { label:'Salary / Income',  keys:['salary','sal ','pay ','stipend','wages'],           color:'green'  },
+    { label:'GST / Tax',        keys:['gst','tds','income tax','pt/','advance tax'],        color:'red'    },
+    { label:'EMI / Loan',       keys:['emi','loan','mortgage','housing','car loan'],        color:'yellow' },
+    { label:'Rent',             keys:['rent','lease'],                                      color:'purple' },
+    { label:'Utilities',        keys:['electric','water bill','gas','internet','broadband','airtel','jio','bsnl','vi '], color:'blue' },
+    { label:'Investment',       keys:['mutual fund','sip','nps','ppf','rd/','fd/','zerodha','groww','stock'], color:'green' },
+    { label:'Bank Charges',     keys:['charge','fee','commission','penalty','interest','gst on charges'], color:'red' },
+    { label:'Transfer',         keys:['neft','rtgs','imps','upi','trf','transfer'],         color:'blue'   },
+    { label:'Cash',             keys:['cash','atm','withdrawal'],                           color:'yellow' },
+  ];
+  const result = {};
+  rules.forEach(r => { result[r.label] = { credit:0, debit:0, count:0, color:r.color }; });
+  result['Other'] = { credit:0, debit:0, count:0, color:'gray' };
+  txns.forEach(t => {
+    const d = t.desc.toLowerCase();
+    let matched = false;
+    for (const r of rules) {
+      if (r.keys.some(kw => d.includes(kw))) {
+        result[r.label].credit += t.credit;
+        result[r.label].debit  += t.debit;
+        result[r.label].count++;
+        matched = true; break;
+      }
+    }
+    if (!matched) { result['Other'].credit += t.credit; result['Other'].debit += t.debit; result['Other'].count++; }
+  });
+  return Object.entries(result).filter(([,v]) => v.count > 0)
+    .map(([label, v]) => ({ label, ...v }))
+    .sort((a,b) => (b.credit+b.debit) - (a.credit+a.debit));
+}
+
+function analyzeTransactions(txns) {
+  if (!txns.length) return null;
+  const totalCredit = txns.reduce((s,t) => s+t.credit, 0);
+  const totalDebit  = txns.reduce((s,t) => s+t.debit,  0);
+  const net = totalCredit - totalDebit;
+  const dates = txns.map(t => t.date).sort();
+  const monthlyMap = {};
+  txns.forEach(t => {
+    const k = t.date.slice(0,7);
+    if (!monthlyMap[k]) monthlyMap[k] = { credit:0, debit:0 };
+    monthlyMap[k].credit += t.credit;
+    monthlyMap[k].debit  += t.debit;
+  });
+  const monthly = Object.entries(monthlyMap).sort(([a],[b]) => a.localeCompare(b))
+    .map(([month, v]) => ({ month, ...v }));
+  const categories = categorizeTransactions(txns);
+  const topDebits  = [...txns].filter(t=>t.debit>0).sort((a,b)=>b.debit-a.debit).slice(0,5);
+  const topCredits = [...txns].filter(t=>t.credit>0).sort((a,b)=>b.credit-a.credit).slice(0,5);
+  return { totalCredit, totalDebit, net, fromDate: dates[0], toDate: dates[dates.length-1],
+           txCount: txns.length, monthly, categories, topDebits, topCredits };
+}
+
+async function handleBankFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!['csv','xlsx','xls','pdf'].includes(ext)) {
+    toast('Unsupported format. Use CSV, Excel, or PDF.', 'error'); return;
+  }
+  state.loading = true; renderApp();
+  try {
+    const clientId = document.getElementById('baClientSelect')?.value || '';
+    const fy       = document.getElementById('baFYInput')?.value || '';
+    if (ext === 'pdf') {
+      state.data.bankData = { transactions:[], analysis:null, clientId, fy, fileName:file.name, fileObj:file, pdfUrl: URL.createObjectURL(file) };
+    } else {
+      let rows = [];
+      if (ext === 'csv') {
+        const text = await file.text();
+        rows = parseCSVRows(text);
+      } else {
+        const buf = await file.arrayBuffer();
+        const wb  = XLSX.read(buf, { type:'array', cellDates:false });
+        const ws  = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'' });
+      }
+      const txns    = detectAndNormalizeColumns(rows);
+      const analysis = analyzeTransactions(txns);
+      if (!txns.length) { toast('Could not detect transactions. Check the file format.','error'); state.loading=false; renderApp(); return; }
+      state.data.bankData = { transactions:txns, analysis, clientId, fy, fileName:file.name, fileObj:file, pdfUrl:null };
+    }
+    state.data.bankSearch = ''; state.data.bankPage = 0;
+  } catch(e) { toast('Parse error: ' + e.message, 'error'); }
+  state.loading = false; renderApp();
+}
+
+async function saveBankStatementToVault() {
+  const bd = state.data.bankData;
+  if (!bd?.fileObj) return;
+  if (!bd.clientId) { toast('Select a client first', 'error'); return; }
+  const fd = new FormData();
+  fd.append('file', bd.fileObj);
+  fd.append('clientId', bd.clientId);
+  fd.append('documentType', 'bank_statement');
+  fd.append('financialYear', bd.fy || '');
+  try {
+    const res = await fetch(API + '/documents/upload', { method:'POST', headers:{ 'Authorization':'Bearer '+state.token }, body:fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || 'Upload failed');
+    toast('Saved to Document Vault', 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function renderBankAnalysis() {
+  const bd = state.data.bankData;
+  const clients = state.data.clients || [];
+
+  if (!bd) {
+    return `
+    <div class="card" style="max-width:640px;margin:0 auto">
+      <div style="text-align:center;margin-bottom:28px">
+        <div style="font-size:48px;margin-bottom:10px">🏦</div>
+        <h2 style="font-size:20px;font-weight:700;margin-bottom:6px">Bank Statement Analyser</h2>
+        <div style="font-size:13px;color:var(--text3)">Upload a bank statement to get instant insights — credits, debits, trends & category breakdown</div>
+      </div>
+      <div class="form-row" style="margin-bottom:20px">
+        <div class="form-group">
+          <label>Client <span style="color:var(--text3)">(optional)</span></label>
+          <select id="baClientSelect">
+            <option value="">— Select Client —</option>
+            ${clients.map(c=>`<option value="${c.id}">${c.full_name} (${c.client_code})</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Financial Year <span style="color:var(--text3)">(optional)</span></label>
+          <input id="baFYInput" placeholder="e.g. 2024-25">
+        </div>
+      </div>
+      <div id="baDropZone" style="border:2px dashed var(--border);border-radius:12px;padding:48px 24px;text-align:center;cursor:pointer;transition:border-color .2s"
+           onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+        <div style="font-size:52px;margin-bottom:12px">📂</div>
+        <div style="font-weight:600;font-size:15px;margin-bottom:6px">Drop your bank statement here</div>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:20px">Supports CSV · Excel (.xlsx / .xls) · PDF &nbsp;—&nbsp; exports from any Indian bank</div>
+        <input type="file" id="baFileInput" accept=".csv,.xlsx,.xls,.pdf" style="display:none">
+        <button class="btn btn-primary" onclick="document.getElementById('baFileInput').click()">Browse File</button>
+      </div>
+    </div>`;
+  }
+
+  const { analysis, transactions, fileName, clientId, fy, pdfUrl } = bd;
+  const clientName = clients.find(c=>c.id===clientId)?.full_name || '';
+
+  // PDF mode — preview only
+  if (pdfUrl) {
+    return `
+    <div style="display:flex;flex-direction:column;gap:12px;height:calc(100vh - 120px)">
+      <div class="card" style="padding:12px 16px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+        <div>
+          <span style="font-weight:600">📄 ${fileName}</span>
+          ${clientName ? `<span style="color:var(--text3);margin-left:12px;font-size:12px">${clientName}</span>` : ''}
+          ${fy ? `<span style="color:var(--text3);margin-left:8px;font-size:12px">FY ${fy}</span>` : ''}
+          <span class="badge badge-blue" style="margin-left:10px;font-size:10px">PDF Preview</span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="saveBankStatementToVault()">💾 Save to Vault</button>
+          <button class="btn btn-secondary btn-sm" onclick="state.data.bankData=null;renderApp()">↩ Upload New</button>
+        </div>
+      </div>
+      <div class="card" style="padding:0;flex:1;overflow:hidden">
+        <iframe src="${pdfUrl}" style="width:100%;height:100%;border:none;border-radius:8px"></iframe>
+      </div>
+    </div>`;
+  }
+
+  // Analysis mode
+  const a = analysis;
+  const netColor = a.net >= 0 ? 'var(--green)' : 'var(--red)';
+  const maxMonthly = Math.max(...a.monthly.map(m => Math.max(m.credit, m.debit)), 1);
+
+  const PAGE_SIZE = 25;
+  const search = state.data.bankSearch?.toLowerCase() || '';
+  const filtered = transactions.filter(t =>
+    t.desc.toLowerCase().includes(search) ||
+    t.date.includes(search) ||
+    String(t.debit).includes(search) ||
+    String(t.credit).includes(search)
+  );
+  const page  = state.data.bankPage || 0;
+  const total = Math.ceil(filtered.length / PAGE_SIZE);
+  const paged = filtered.slice(page * PAGE_SIZE, (page+1) * PAGE_SIZE);
+
+  return `
+  <div style="display:flex;flex-direction:column;gap:14px">
+
+    <!-- Header bar -->
+    <div class="card" style="padding:12px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div>
+        <span style="font-weight:600">📊 ${fileName}</span>
+        ${clientName ? `<span style="color:var(--text3);margin-left:12px;font-size:12px">👤 ${clientName}</span>` : ''}
+        ${fy ? `<span style="color:var(--text3);margin-left:8px;font-size:12px">FY ${fy}</span>` : ''}
+        <span style="color:var(--text3);margin-left:12px;font-size:12px">📅 ${a.fromDate} → ${a.toDate}</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary btn-sm" onclick="saveBankStatementToVault()">💾 Save to Vault</button>
+        <button class="btn btn-secondary btn-sm" onclick="state.data.bankData=null;renderApp()">↩ Upload New</button>
+      </div>
+    </div>
+
+    <!-- 4 Stat Cards -->
+    <div class="stat-cards" style="grid-template-columns:repeat(4,1fr)">
+      <div class="stat-card">
+        <div class="stat-label">Total Credits</div>
+        <div class="stat-value" style="color:var(--green)">${formatINR(a.totalCredit)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Debits</div>
+        <div class="stat-value" style="color:var(--red)">${formatINR(a.totalDebit)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Net Flow</div>
+        <div class="stat-value" style="color:${netColor}">${a.net>=0?'+':'−'}${formatINR(Math.abs(a.net))}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Transactions</div>
+        <div class="stat-value">${a.txCount}</div>
+      </div>
+    </div>
+
+    <!-- Monthly Trend Chart -->
+    <div class="card">
+      <div style="font-weight:600;margin-bottom:14px;font-size:13px">📈 Monthly Trend
+        <span style="font-size:11px;font-weight:400;color:var(--text3);margin-left:10px">
+          <span style="color:var(--green)">■</span> Credits &nbsp; <span style="color:var(--red)">■</span> Debits
+        </span>
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:6px;height:160px;overflow-x:auto;padding-bottom:4px">
+        ${a.monthly.map(m => {
+          const ch = Math.round((m.credit / maxMonthly) * 130);
+          const dh = Math.round((m.debit  / maxMonthly) * 130);
+          const mon = m.month.slice(0,7);
+          return `
+          <div style="flex:0 0 auto;min-width:40px;display:flex;flex-direction:column;align-items:center;gap:2px" title="${mon}&#10;Credits: ${formatINR(m.credit)}&#10;Debits: ${formatINR(m.debit)}">
+            <div style="display:flex;align-items:flex-end;gap:2px;height:130px">
+              <div style="width:12px;height:${ch}px;background:var(--green);border-radius:3px 3px 0 0;min-height:2px"></div>
+              <div style="width:12px;height:${dh}px;background:var(--red);border-radius:3px 3px 0 0;min-height:2px"></div>
+            </div>
+            <div style="font-size:9px;color:var(--text3);white-space:nowrap;transform:rotate(-40deg);transform-origin:center;margin-top:4px">${mon}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Category + Top Txns -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="card" style="padding:0">
+        <div style="padding:14px 16px;font-weight:600;font-size:13px;border-bottom:1px solid var(--border)">🏷️ Category Breakdown</div>
+        <div class="table-wrap">
+          <table>
+            <tr><th>Category</th><th>Credits</th><th>Debits</th><th>Txns</th></tr>
+            ${a.categories.map(c => `
+            <tr>
+              <td><span class="badge badge-${c.color}" style="font-size:10px">${c.label}</span></td>
+              <td style="font-size:12px;color:var(--green)">${c.credit>0?formatINR(c.credit):'—'}</td>
+              <td style="font-size:12px;color:var(--red)">${c.debit>0?formatINR(c.debit):'—'}</td>
+              <td style="font-size:12px">${c.count}</td>
+            </tr>`).join('')}
+          </table>
+        </div>
+      </div>
+      <div class="card" style="padding:0">
+        <div style="padding:14px 16px;font-weight:600;font-size:13px;border-bottom:1px solid var(--border)">🔺 Top Debits</div>
+        <div class="table-wrap">
+          <table>
+            <tr><th>Date</th><th>Description</th><th>Amount</th></tr>
+            ${a.topDebits.map(t=>`<tr>
+              <td style="font-size:11px;white-space:nowrap">${t.date}</td>
+              <td style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.desc}">${t.desc||'—'}</td>
+              <td style="font-size:12px;color:var(--red);white-space:nowrap">${formatINR(t.debit)}</td>
+            </tr>`).join('')}
+          </table>
+        </div>
+        <div style="padding:14px 16px;font-weight:600;font-size:13px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">🔻 Top Credits</div>
+        <div class="table-wrap">
+          <table>
+            <tr><th>Date</th><th>Description</th><th>Amount</th></tr>
+            ${a.topCredits.map(t=>`<tr>
+              <td style="font-size:11px;white-space:nowrap">${t.date}</td>
+              <td style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${t.desc}">${t.desc||'—'}</td>
+              <td style="font-size:12px;color:var(--green);white-space:nowrap">${formatINR(t.credit)}</td>
+            </tr>`).join('')}
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Transaction Table -->
+    <div class="card" style="padding:0">
+      <div style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)">
+        <div style="font-weight:600;font-size:13px">📋 All Transactions <span style="color:var(--text3);font-weight:400">(${filtered.length})</span></div>
+        <input id="baTxSearch" placeholder="Search transactions..." value="${state.data.bankSearch||''}"
+          style="max-width:240px;padding:6px 12px;font-size:12px" oninput="state.data.bankSearch=this.value;state.data.bankPage=0;renderMain()">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <tr><th>Date</th><th>Description</th><th style="text-align:right">Debit</th><th style="text-align:right">Credit</th><th style="text-align:right">Balance</th></tr>
+          ${paged.length ? paged.map(t=>`<tr>
+            <td style="font-size:12px;white-space:nowrap">${t.date}</td>
+            <td style="font-size:12px;max-width:340px">${t.desc||'—'}</td>
+            <td style="font-size:12px;text-align:right;color:${t.debit>0?'var(--red)':'var(--text3)'}">${t.debit>0?formatINR(t.debit):'—'}</td>
+            <td style="font-size:12px;text-align:right;color:${t.credit>0?'var(--green)':'var(--text3)'}">${t.credit>0?formatINR(t.credit):'—'}</td>
+            <td style="font-size:12px;text-align:right;color:var(--text2)">${t.balance!=null?formatINR(t.balance):'—'}</td>
+          </tr>`).join('') : `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text3)">No transactions match your search.</td></tr>`}
+        </table>
+      </div>
+      ${total > 1 ? `
+      <div style="padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border)">
+        <button id="baPrev" class="btn btn-secondary btn-sm" ${page===0?'disabled':''} onclick="state.data.bankPage--;renderMain()">← Prev</button>
+        <span style="font-size:12px;color:var(--text3)">Page ${page+1} of ${total}</span>
+        <button id="baNext" class="btn btn-secondary btn-sm" ${page>=total-1?'disabled':''} onclick="state.data.bankPage++;renderMain()">Next →</button>
+      </div>` : ''}
+    </div>
+  </div>`;
+}
+
+function bindBankAnalysis() {
+  const fi = document.getElementById('baFileInput');
+  if (fi) fi.addEventListener('change', e => { if (e.target.files[0]) handleBankFile(e.target.files[0]); });
+  const dz = document.getElementById('baDropZone');
+  if (dz) {
+    dz.addEventListener('dragover', e => { e.preventDefault(); dz.style.borderColor='var(--accent)'; dz.style.background='var(--accent-dim)'; });
+    dz.addEventListener('dragleave', () => { dz.style.borderColor='var(--border)'; dz.style.background=''; });
+    dz.addEventListener('drop', e => {
+      e.preventDefault(); dz.style.borderColor='var(--border)'; dz.style.background='';
+      const file = e.dataTransfer.files[0];
+      if (file) handleBankFile(file);
+    });
+  }
+}
 
 // ── ANALYTICS
 function renderAnalytics() {
