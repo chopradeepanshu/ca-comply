@@ -796,10 +796,19 @@ async function showClientDetail(clientId) {
           ${d.documents.length > 0 ? `
             <div style="font-size:14px;font-weight:700;margin:14px 0 10px">Documents (${d.documents.length})</div>
             <div style="display:flex;flex-wrap:wrap;gap:8px">
-              ${d.documents.slice(0,6).map(doc => `
-                <div style="padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px">
-                  📄 ${doc.original_name}
-                  <div style="font-size:10px;color:var(--text3)">${doc.document_type} · ${doc.financial_year || ''}</div>
+              ${d.documents.map(doc => `
+                <div onclick="previewDoc(this)"
+                     data-path="${doc.storage_path}"
+                     data-name="${(doc.original_name || '').replace(/"/g, '&quot;')}"
+                     data-mime="${doc.mime_type || ''}"
+                     data-type="${doc.document_type}"
+                     data-fy="${doc.financial_year || ''}"
+                     data-size="${doc.file_size || 0}"
+                     style="padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:12px;cursor:pointer;transition:border-color .15s"
+                     onmouseover="this.style.borderColor='var(--accent)'"
+                     onmouseout="this.style.borderColor='var(--border)'">
+                  ${doc.mime_type?.includes('pdf') ? '📄' : doc.mime_type?.startsWith('image') ? '🖼️' : '📎'} ${doc.original_name}
+                  <div style="font-size:10px;color:var(--text3)">${doc.document_type}${doc.financial_year ? ' · ' + doc.financial_year : ''}</div>
                 </div>
               `).join('')}
             </div>
@@ -809,6 +818,50 @@ async function showClientDetail(clientId) {
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
   } catch (e) { toast(e.message, 'error'); }
+}
+
+function previewDoc(el) {
+  const { path, name, mime, type, fy, size } = el.dataset;
+  let preview = '';
+  if (mime.includes('pdf')) {
+    preview = `<iframe src="${path}" style="width:100%;height:65vh;border:none;border-radius:8px;background:var(--surface2)"></iframe>`;
+  } else if (mime.startsWith('image/')) {
+    preview = `<div style="text-align:center"><img src="${path}" style="max-width:100%;max-height:65vh;border-radius:8px;object-fit:contain"></div>`;
+  } else {
+    preview = `<div style="text-align:center;padding:60px;color:var(--text3)">
+      <div style="font-size:64px;margin-bottom:16px">📎</div>
+      <div style="font-size:14px">Preview not available for this file type</div>
+      <div style="font-size:12px;margin-top:6px">Download the file to view it</div>
+    </div>`;
+  }
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal modal-lg" style="max-width:860px;width:92vw">
+      <div class="modal-header">
+        <div>
+          <div style="font-weight:600;font-size:14px">${name}</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">${type}${fy ? ' · FY ' + fy : ''}${size ? ' · ' + formatBytes(parseInt(size)) : ''}</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary btn-sm" onclick="confirmDownload('${path}','${name.replace(/'/g, "\\'")}')">⬇ Download</button>
+          <button class="btn-icon" onclick="this.closest('.modal-overlay').remove()">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="padding:16px">${preview}</div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+function confirmDownload(path, name) {
+  if (!confirm(`Download "${name}"?`)) return;
+  const a = document.createElement('a');
+  a.href = path;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // ── DOCUMENTS
@@ -849,7 +902,7 @@ function renderDocuments() {
           <td style="font-size:12px">${d.uploaded_by_name || '—'}</td>
           <td style="font-size:12px">${new Date(d.created_at).toLocaleDateString('en-IN')}</td>
           <td>
-            <a href="${API.replace('/api','')}${d.storage_path}" target="_blank" class="btn btn-sm btn-secondary">Download</a>
+            <a href="${d.storage_path}" target="_blank" class="btn btn-sm btn-secondary">Download</a>
           </td>
         </tr>`).join('')}
     </table></div>
