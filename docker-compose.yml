@@ -37,6 +37,7 @@ services:
       DATABASE_URL: postgresql://ca_comply_user:Ca_Comply_Secure_Pass_2024!@postgres:5432/ca_comply
       JWT_SECRET: ca_comply_jwt_secret_super_secure_key_2024_production
       JWT_REFRESH_SECRET: ca_comply_refresh_jwt_secret_secure_key_2024_prod
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - uploads_data:/app/uploads
     ports:

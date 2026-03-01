@@ -16,6 +16,7 @@ const analyticsRoutes = require('./routes/analytics');
 const notificationRoutes = require('./routes/notifications');
 const healthRoutes = require('./routes/health');
 const tenantRoutes = require('./routes/tenants');
+const bankAnalysisRoutes = require('./routes/bank-analysis');
 
 const { errorHandler } = require('./middleware/errorHandler');
 const { requestLogger } = require('./middleware/metrics');
@@ -53,6 +54,7 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/tenants', tenantRoutes);
+app.use('/api/bank-analysis', bankAnalysisRoutes);
 
 // 404
 app.use('/api/*', (req, res) => {
@@ -70,6 +72,8 @@ async function start() {
     try {
       await pool.query('SELECT 1');
       console.log('✅ Database connected');
+      await pool.query('ALTER TABLE clients ADD COLUMN IF NOT EXISTS avatar_url TEXT');
+      console.log('✅ Schema migrations applied');
       break;
     } catch (e) {
       retries--;

@@ -1,6 +1,15 @@
 const router = require('express').Router();
+const multer = require('multer');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../db/pool');
 const { authenticate, requireRole } = require('../middleware/auth');
+
+const avatarStorage = multer.diskStorage({
+  destination: path.join(__dirname, '../../uploads'),
+  filename: (req, file, cb) => cb(null, `avatar-${uuidv4()}${path.extname(file.originalname)}`),
+});
+const avatarUpload = multer({ storage: avatarStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: (req, file, cb) => cb(null, file.mimetype.startsWith('image/')) });
 
 router.use(authenticate);
 
@@ -110,6 +119,16 @@ router.patch('/:id', requireRole('partner', 'manager'), async (req, res, next) =
 
     if (!result.rows.length) return res.status(404).json({ error: 'Client not found' });
     res.json({ client: result.rows[0] });
+  } catch (err) { next(err); }
+});
+
+// POST /api/clients/:id/avatar
+router.post('/:id/avatar', avatarUpload.single('avatar'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
+    const url = `/uploads/${req.file.filename}`;
+    await pool.query('UPDATE clients SET avatar_url=$1, updated_at=NOW() WHERE id=$2 AND tenant_id=$3', [url, req.params.id, req.tenantId]);
+    res.json({ avatar_url: url });
   } catch (err) { next(err); }
 });
 
